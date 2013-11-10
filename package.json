@@ -1,7 +1,7 @@
 {
   "author": "Sebastian Glaser <anx@ulzq.de> (http://github.com/hakt0r/xum)",
   "name": "xum",
-  "description": "xuper uplink multiplexer",
+  "description": "cross uplink multiplexer",
   "version": "0.0.1",
   "repository": {
     "type": "git",

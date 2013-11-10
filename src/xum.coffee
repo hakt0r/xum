@@ -1,16 +1,19 @@
-###
-
-  Xum - Xuper Uplink Multiplexer
-    
+#!/usr/bin/env coffee
+#
+### Xum - Cross Uplink Multiplexer
+#    
     Bond multiple uplinks
-
     c) 2008-2013 Sebastian Glaser
-    
-    Version: 0.30.0-retrogod
+    c) 1999-2005 nd-kt-nr
+
+    Version: 0.33.5-retrogod
     License: GNU GPL Version 3
 
-    node-xum/0.30.0-retrogod  : c) 2013 Sebastian Glaser
+    node-xum/0.33.5-retrogod  : c) 2013 Sebastian Glaser
+
+    based on:
     mudx-ssh/0.22.7-goldfinger: c) 2008-2013 Sebastian Glaser
+    uplinks /0.11.9-rubberglue: c) 1999-2005 nd-kt-nr
 
   This file is part of Xum.
 
@@ -29,337 +32,244 @@
   the Free Software Foundation, Inc., 59 Temple Place, Suite 330,
   Boston, MA 02111-1307 USA
   
-  http://www.gnu.org/licenses/gpl.html
+  http://www.gnu.org/licenses/gpl.html ###
 
-###
-
-class NMEndpoint
-  port : 20222
-  bySrc : {}
-
-class NMNode
-  port : 20222
-  bySrc : {}
-
-  tinc :
-    start : (opts) -> """tincd -D -c #{opts.tinc.dir} -R --pidfile = #{opts.tinc.dir}/pid"""
-    stop  : (opts) -> """kill -HUP $(cat #{opts.tinc.dir}/pid|head -n1)"""
-    conf  : (opts) ->
-      { host, net, peers } = opts
-      """
-      Name = #{host.name}
-      Mode = router
-      DeviceType = tun
-      Interface = #{net.name}
-      ConnectTo = #{peers.join(' ')}
-      """
-    up : (opts) ->
-      { host, net } = opts
-      """ifconfig #{net.name} #{host.ip} netmask 255.255.255.0"""
-    down : -> """"""
-    update : (opts) -> """
-      mkdir -p #{opts.tinc.dir}/hosts
-      mkdir -p #{opts.tinc.dir}/hosts.d
-      local node = "$1"; local nodepath = "#{opts.tinc.dir}/hosts.d/$node";
-      mkdir -p "#{node.path}";
-      echo "$2"                                 >"#{node.path}/vpn.ip";
-      test -z "$3" || echo "$3"                 >"#{node.path}/pub.ip";
-      profile = linux; echo $profile              >"#{node.path}/profile";
-      # generate new id
-      t tincd --config = #{opts.tinc.dir} -K;
-      cat "#{opts.tinc.dir}/hosts/$node"        >"#{node.path}/rsa_key.pub"
-      echo "$node" > "#{opts.tinc.dir}/self";
-      test -f "#{node.path}/pub.ip" && local pubip = $(cat #{node.path}/pub.ip);
-      """
-
-cp = require 'child_process'
-optimist = require 'optimist'
+os  = require 'os'
+fs  = require 'fs'
+cp  = require 'child_process'
+net = require "net"
+tls = require "tls"
+ync = require 'ync'
 colors = require 'colors'
-# get_system_hostname = -> cp.exec "hostname", (error,stdconsole.log,stderr)->
+optimist = require 'optimist'
 
-opts = 
-  net : {}
-  host : {}
-  peers : {}
+class Storable
+  constructor : (@path, opts={}) -> { @defaults, override } = opts; null
+  read : (callback) =>
+    _read = (inp) => try
+      inp = {} unless inp?
+      if @defaults?
+        inp[k] = v for k,v of @defaults when not inp[k]?
+        inp[k] = v for k,v of @defaults when typeof v is 'Number' and typeof inp[k] isnt 'Number'
+      if override?
+        inp[k] = v for k,v of override  when override[k]?
+      @[k] = v for k,v of inp
+      callback inp if callback?
+    fs.readFile @path, (err, data) =>
+      log 'error', err if err
+      try _read JSON.parse data.toString('utf8')
+      catch e
+        log 'error', e; _read {}; @save()
+    null
+  override : (opts={}) =>
+    change = no
+    for k, v of opts
+      change = yes
+      @[k] = v
+    try @save() if change
+    null
+  save : (callback) =>
+    out = {}
+    out[k] = v for k,v of @ when typeof v isnt 'function' and k isnt 'path' and k isnt 'defaults'
+    try fs.writeFile @path, JSON.stringify(out), callback
+    null
 
-argv = require('optimist').argv
+script = (cmd, callback) ->
+  c = cp.spawn "sh", ["-c",cmd]
+  c.stdout.setEncoding 'utf8'
+  c.stderr.setEncoding 'utf8'
+  if callback?
+    c.buf = []
+    c.stdout.on 'data', (d) -> c.buf.push(d)
+    c.stderr.on 'data', (d) -> c.buf.push(d)
+    c.on 'close', (e) -> callback(e, c.buf.join().trim())
+  else
+    c.stdout.on 'data', (d) -> console.log d
+    c.stderr.on 'data', (d) -> console.log d
+  return c
 
-# if argv.create
-#<opts.net.name = arg
-getmac = (l) ->
-  r = l.match /[0-9a-fA-F:]+:[0-9a-fA-F:]+:[0-9a-fA-F:]+:[0-9a-fA-F:]+:[0-9a-fA-F:]+:[0-9a-fA-F:]+/
-  return if r then r.shift() else "00:00:00:00:00:00"
+scriptline = (cmd, callback) ->
+  c = cp.spawn "sh", [ "-c", cmd ], stdio : 'pipe'
+  c.stdout.setEncoding 'utf8'
+  c.stderr.setEncoding 'utf8'
+  callback.error = console.log unless callback.error
+  callback.line  = console.log unless callback.line
+  callback.end   = (->) unless callback.end
+  c.stderr.on 'data', (data) -> callback.error l.trim() for l in data.split '\n'
+  c.stdout.on 'data', (data) -> callback.line  l.trim() for l in data.split '\n'
+  c.on 'close', callback.end
+  return c
 
-ip2long = (ip) ->
-  [o1,o2,o3,o4] = ip.split '.'
-  return parseInt(o1) << 24 | parseInt(o2) << 16 | parseInt(o3) << 8 | parseInt(o4)
+log = (key, args...) -> console.log.apply null, ['[',      key,     ']'        ].concat args
+loc = (key, args...) -> console.log.apply null, ['['+'client'.green+'|'+key+']'].concat args
+lor = (key, args...) -> console.log.apply null, ['['+ 'server'.red +'|'+key+']'].concat args
 
-long2ip = (ip) ->
-  return [ip >>> 24, ip >>> 16 & 0xFF, ip >>> 8 & 0xFF, ip & 0xFF].join('.')
+hostname = null
+link     = {}
+path     = __filename
+args     = optimist.argv._
+argv     = optimist.argv
+HOME     = argv.config || process.env.HOME + "/.xum"
+port     = argv.port   || 33999
+localip  = argv.local  || '6.66.0.1'
+remoteip = argv.remote || '6.66.0.2'
+pref     = new Storable HOME + '/config.json', defaults : hostname : null, ssl : {}
+cmd      = args.shift()
 
-dotmask2cidr = (mask) -> # courtsey of php.net manual (joe at joeceresini dot com)
-  long = ip2long mask
-  base = ip2long '255.255.255.255'
-  return (32 - Math.log((long ^ base)+1,2)).toString().trim()
+switch cmd
+  when 'deps' then process.exit 0
 
-cidr2dotmask = (cidr) -> # courtsey of m (hakt0r.de/om/, anx at hakt0r dot de)
-  mask = 0xffffffff << 32 - cidr
-  return ''+
-    (mask >> 24 & 255)  +'+'+
-    (mask >> 16 & 255 ) +'+'+
-    (mask >> 8  & 255 ) +'+'+
-    (mask & 255 )
+  when 'init'
+    generate = no
+    ssl = new ync.Sync
+      run : no
+      read : -> pref.read ssl.proceed
+      hostname : -> script 'hostname', (s,h) -> hostname = pref.hostname = h.trim(); ssl.proceed()
+      generate_key : -> if pref.ssl.key? then ssl.proceed() else
+        log 'ssl'.blue, 'Generating ssl key:'.red, HOME.yellow
+        generate = yes
+        script """
+          mkdir -p $HOME/.xum && cd $HOME/.xum || exit 1 
+          openssl genrsa -out #{HOME}/server-key.pem 4096
+          openssl req -new -x509 -subj "/C=XX/ST=xum/L=api/O=IT/CN=#{hostname}" -key #{HOME}/server-key.pem -out #{HOME}/server-cert.pem
+        """, (status,err) ->
+          pref.ssl.key = fs.readFileSync HOME + "/server-key.pem", 'utf8'
+          pref.ssl.cert = fs.readFileSync HOME + "/server-cert.pem", 'utf8'
+          pref.save()
+          ssl.proceed()
+      cleanup : -> script """
+          rm #{HOME}/server-key.pem
+          rm #{HOME}/server-cert.pem
+        """, @proceed
+      done : -> log 'ssl'.blue, 'DONE'.green if generate
+    ssl.run()
 
-class Xum
-  @dev : {}
-  @old :
-    gw : undefined
+  when 'add'
+    _rebuild = ->
+      # console.log "rebuilding".red
+      links =
+        ppp  : dev : 'usb0',  ip : '192.168.42.128', base : '192.168.42.0', gw : '192.168.42.129', weight : 100, num : 1, mask : '24'
+        wifi : dev : 'wlan0', ip : '192.168.43.130', base : '192.168.43.0', gw : '192.168.43.1'  , weight : 100, num : 2, mask : '24'
+      s = """
+        iptables -F INPUT; iptables -F OUTPUT
+        iptables -A INPUT -m state --state ESTABLISHED,RELATED -j CONNMARK --restore-mark
+        iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j CONNMARK --restore-mark\n"""
+      s += """
+        grep -q "^10#{l.num}" /etc/iproute2/rt_tables ||
+          echo "10#{l.num} T#{l.dev}" >> /etc/iproute2/rt_tables
+        # Routes for #{l.dev}
+        ip route flush table T#{l.dev}
+        ip route show table main | grep -Ev '(^default)' | grep #{l.dev} | while read ROUTE ; do
+          ip route add table T#{l.dev} $ROUTE; done
+        ip route add table T#{l.dev} #{l.gw} dev #{l.dev} src #{l.ip}
+        ip route add table T#{l.dev} default via #{l.gw}
+        ip rule add from #{l.gw} lookup T#{l.dev}
+        ip rule add fwmark #{l.num} lookup T#{l.dev}
+        iptables -A INPUT -i #{l.dev} -m state --state NEW -j CONNMARK --set-mark #{l.num}
+        iptables -A INPUT -m connmark --mark #{l.num} -j MARK --set-mark #{l.num}
+        iptables -A INPUT -i #{l.dev} -m state --state NEW -p tcp --sport 3398#{l.num} -j CONNMARK --set-mark #{l.num}\n
+      """ for k,l of links
+      s += """iptables -A INPUT -m state --state NEW -m connmark ! --mark 0   -j CONNMARK --save-mark"""
+      console.log s
+    _rebuild()
 
-  @init : () ->
-    cp.exec "ip route|grep '^default'|cut -d ' ' -f 3",{},(e,s,m) =>
-      @old.gw = s.trim()
+  when 'connect'
+    address = args.shift(); ssh = vpn = null
+    [ user, address ] = address.split(/@/) if address.match /@/
+    [ address, sshport ] = address.split(/:/) if address.match /:/
+    user = process.env.USER unless user?
+    sshport = 22 unless sshport?
+    loc 'connect'.yellow, 'to', user.blue+'@'+address.cyan+':'+sshport.toString().magenta, '[', path.black, ']'
+    connect = new ync.Sync
+      read : -> pref.read @proceed
 
-  @help : () ->
-    console.log """
-      \nUSAGE: xum [-s|-c*] [-d] [-p] [-v] [-P] [user@]addr[:port]
-        install | verify | help, -h, --help
-        -p cookie          (usually autogenerated)
-        -P ss_ port
-        -s servermode
-        -c clientmode      (default)
-        -v vpn_server port (must be >1024, on both endpoints)
-        -d debug
-        -auto              (autodetect links)
-        +link NAME [dev DEV] [net ip/cidr] [ip IP] [mask MASK] [gw GW] [w WEIGHT]
-                           (add link with NAME on DEV [using GW] [limit to RATE byte/s])
-        -link NAME         (remove link)"""
+      ssh : ->
+        return @proceed()
+        ssh = scriptline """ 
+          cat #{path} | ssh -Tp #{sshport} #{user}@#{address} '
+            echo "xum bootstrap $HOME/.xum/xum"
+            mkdir -p $HOME/.xum && cd $HOME/.xum || exit 1 
+            cat - > ./xum
+            echo "xum check $(md5sum ./xum)"
+            coffee ./xum deps || {
+              echo "xum deps install"
+              npm install optimist colors portfinder ync 2>&1
+              echo "xum deps installed" ; }
+            ls -alh
+            test -f config.json || {
+              echo "xum init"
+              coffee ./xum init; }
+            echo "xum start mux"
+            coffee ./xum server 33999 &
+            read; exit 0
+        '""",
+          error : (line) -> log 'ssh'.red, line.trim() unless line is ''
+          line : (line) ->
+            if line.match /xum /
+              line = line.split(/\ /); line.shift()
+              status = line.shift()
+              switch status
+                when 'pid'
+                  pref.remote = pid : line.shift(), port : null
+                when 'port'
+                  pref.remote.port = line.shift()
+                  pref.save()
+                when 'ready'
+                  loc 'server'.blue, 'ready'.green
+                  connect.proceed()
+                else loc 'ssh'.blue, status.red, line
+            #else if line isnt '' then lor 'debug'.black, line
+            null
 
-  @link_detect : () ->
-    console.log "detecting links".yellow
-    cp.exec "LANG=C ifconfig -a",{},(e,s,m) =>
-      s = s.toString().split("\n")
-      d = undefined
-      for l in s
-        if l.match /^[a-z]/
-          @dev[d.dev] = d if d?
-          d  = {}
-          d.dev  = l.replace /\ .*/, ''
-          d.name = d.dev
-          rest = l.replace /[a-zA-Z]+ */, ''
-          d.mac  = getmac(l)
-        else
-          if l.match /inet addr:/
-            r = l.match /[0-9]+.[0-9]+.[0-9]+.[0-9]+/g
-            d.ip = r.shift()
-            if d.dev.match /^ppp/ then d.gw = r.shift()
-            else d.bcast = r.shift()
-            d.mask = r.shift()
-      @dev[d.dev] = d
-      for name,d of @dev
-        @guess_gw d if !d.gw? and d.ip? and d.mask?
-        console.log "found".yellow, d.dev.green, d.mac.yellow, d.ip, d.mask
-        if d.ge? and d.ip? and d.ip isnt d.gw then @link_add d
-      return true
+      tun : ->
+        tlsopts = rejectUnauthorized : no, key: pref.ssl.key, cert: pref.ssl.cert
+        server = net.createServer (socket) ->
+          loc 'tun'.magenta, 'peer'.green, socket.remoteAddress  
+          loc 'prx'.magenta, 'connecting'.green, address, port - 1
+          socket.on 'error', (err) -> loc 'tun'.magenta, 'error'.red, err
+          relay = tls.connect port - 1, address, tlsopts, (err) -> unless err
+            socket.pipe relay; relay.pipe socket
+            loc 'prx'.magenta, 'connected'.green, relay.remoteAddress, port - 1
+          relay.on 'error', (err) -> loc 'prx'.magenta, 'error'.red, err
+        server.listen port, => @proceed loc 'tun'.magenta, 'listening on port', port
 
-  @guess_gw : (dev) ->
-    return dev unless dev.ip? and dev.mask?
-    oldgw  = @old.gw
-    dev.gw = long2ip(ip2long(dev.ip) & ip2long(dev.mask) | ip2long('0.0.0.1'))
-    console.log "guess".yellow, dev.dev.green, dev.gw.red
-    return dev
+      vpn : -> vpn = scriptline """
+          openvpn --script-security 2 --proto tcp-client --remote 127.0.0.1 #{port} --dev tun --ifconfig #{localip} #{remoteip}
+        """,
+          error : (line) -> loc 'vpn'.red, line.trim() unless line is ''
+          line : (line) -> loc 'vpn'.blue, line.trim() unless line is ''
 
-  @link_add : (device) ->
-    rt = "/etc/iproute2/rt_tables"
-    { connected, tuna, tunp, vpna, vpnp } = @stat
-    { dev, ip, mask, bcast, gw } = device
-    if connected
-      cp.exec """
-        if ! grep -q #{name} #{rt}; then echo #{num} xum_#{name} >> #{rt}; fi
-        ip route flush table #{num}
-        ip route add #{net} dev #{dev} src #{ip} table xum_#{name}
-        ip route add default via #{gw} table xum_#{name}
-        ip route add #{net} dev #{dev} src #{ip}
-        ip rule add from #{gw} table xum_#{name}
-        ip rule add to #{gw} table xum_#{name}
-        ip rule add fwmark #{hexnum} lookup xum_#{name}""",{},(e,s,m) ->
-          @rebuild()
-    else console.log "Not connected."
+  when 'server'
+    [ localip, remoteip ] = [ remoteip, localip ]
+    start = new ync.Sync
+      read : -> pref.read @proceed
+      kill : -> if pref.pid then script "kill -9 #{pref.pid}", @proceed else @proceed()
+      save : ->
+        pref.pid  = process.pid
+        pref.save @proceed
 
-  @link_del : (name) ->
-    { connected, tuna, tunp, vpna, vpnp } = @stat
-    { dev, ip, mask, bcast, gw } = device
-    if @links[name] then { dev, ip, net, gw, num, weight } = @links[name]
-    else return false
+      tls : ->
+        relay = socket = null; tlsopts = rejectUnauthorized : no, key: pref.ssl.key, cert: pref.ssl.cert
+        server = tls.createServer tlsopts, (socket) ->
+          console.log 'tls'.magenta, 'peer', socket.remoteAddress
+          unless relay? then relay = net.connect port, '127.0.0.1', (err) ->
+            console.log 'prx'.magenta, 'connected'.green
+            socket.pipe relay; relay.pipe socket
+        server.on 'error', (err) -> console.log 'tls-server'.magenta, 'error'.red, err
+        server.listen port - 1, (err) =>
+          @proceed console.log 'tls-server'.magenta, 'listening on port', port-1, err
 
-    seq = num-100; hexnum = "0x".num.toBase(10,16)
-    if connected
-      delete @links[name]
-      console.log "del".red, name.green, ip.white, net, dev, "via".yellow, gw.yellow, num, "/", seq, "C:", link_count
-      cp.exec """
-        ip route flush table xum_#{name}
-        ip rule del to #{gw} table xum_#{name}
-        ip rule del from #{gw} table xum_#{name}
-        ip rule del fwmark #{hexnum} lookup xum_#{name}"""
-      @rebuild()
-    else console.log "Not connected. Try 'xum kill'?"
+      vpn : -> @proceed scriptline """
+          openvpn --script-security 2 --proto tcp-server --local 127.0.0.1 --port #{port} --dev tun --ifconfig #{localip} #{remoteip}
+        """,
+          error : (s) -> console.log 'vpn'.magenta, s.red   unless s is ''
+          line  : (s) -> console.log 'vpn'.magenta, s.black unless s is ''
 
-  @guess_ip_fromnet : (net, callback) ->
-    return false unless net.indexOf '/' > -1
-    cp.exec "ip addr show|tr / ' '|grep inet|grep -v inet6|awk '{print $2}'",{},(e,s,m) ->
-      ips = s.split "\n"
-      for addr in ips
-        [ ip, mask ] = addr.split '/'
-        mask = 0xffffffff << (32-mask)
-        if ( ip2long(addr) & mask ) is ( ip2long($ip) & mask )
-          console.log "guess ip".yellow, net, addr, (if net.indexOf('/') > -1 then "net" else "ptp")
-          callback addr
-    return true
+      done : ->
+        console.log 'xum pid',  process.pid
+        console.log 'xum port', port-1, port
+        console.log 'xum ready'
 
-  @guess_net : (ip, callback) -> #roughly guess the network :> IMPROVE FIXME
-    for i in [0...3]
-      ip = ip.split '.'
-      ip = ip.join '.'
-      cp.exec """ip route show|grep "src #{ip}"|awk '{print $1}'|head -n1""",{},(e,s,m) ->
-        s = s.trim()
-        console.log "guess_net".yellow, ip.green, s.yellow
-        callback ( if s.length > 0 then s else false )
-    return true
+  else console.log 'error'.red, 'Command', cmd.red, 'not found.'
 
-  @guess_dev : (ip, callback) ->
-    cp.exec "ifconfig |grep -B1 #{ip}|head -n1|awk '{print $1}'",{},(e,s,m) ->
-      s = s.trim()
-      console.log "guess_dev".yellow, ip.green, s.yellow
-      callback s
-
-  @rebuild : () ->
-    #iptables -tmangle -I PREROUTING 1 -p udp --dport $tunp -m statistic --mode nth --every 2 --packet $seq -j LOG
-    #iptables -tmangle -A PREROUTING -m mark --mark $num -j LOG
-    #iptables -tmangle -A PREROUTING -m mark --mark $num -j MARK --set-mark $num
-    console.log "rebuilding".red
-    { connected, tuna, tunp, vpna, vpnp } = @stat
-    { links, link_count } = @links
-    nfw = "iptables -tmangle -F; iptables -tnat -F; iptables -tfilter -F"
-    ngw = "while route del default; do echo .; done; ip route add default scope global"
-    if Onject.keys(links).length > 0
-      for name, l of links
-        { dev, ip, net, gw, num, weight } = l; seq = num-100; hexnum = "0x" + num.toBase(10,16)
-        ngw += "nexthop via #{gw} dev #{dev} weight #{weight}"
-        nfw += "iptables -tmangle -I OUTPUT 1 -p udp --dport #{tunp} -m statistic --mode nth --every #{link_count} --packet #{seq} -j MARK --set-mark #{num};"
-    else
-      { dev, ip, net, gw, num, weight } = l; seq = num-100; hexnum = "0x" + num.toBase(10,16)
-      ngw += "via " + gw
-      nfw += "\niptables -tmangle -I PREROUTING 1 -p udp --dport #{tunp} -j MARK --set-mark #{num}"
-    cp.exec """
-      #{nfw}
-      #{ngw}
-      ip route flush cache
-      #iptables -tmangle -A POSTROUTING -p udp -j LOG
-      #iptables -tmangle -A POSTROUTING -m mark --mark 101 -j LOG
-      #iptables -tmangle -A POSTROUTING -m mark --mark 100 -j LOG""",{},(e,s,m) ->
-        console.log e,s,m
-
-  @link_add_smart : (args) ->
-    name = args.shift()
-    console.log "smart-adding".yellow, name.yellow
-    while cmd = args.shift()
-      switch cmd
-        when 'dev'  then  dev    = args.shift()
-        when 'gw'   then  gw     = args.shift()
-        when 'ip'   then  ip     = args.shift()
-        when 'mask' then  net    = args.shift()
-        when 'net'  then  cnet   = args.shift()
-        when 'w'    then  weight = args.shift()
-        else
-          console.log "Error".red, "unknown parameter: ".white , cmd.yellow
-          process.exit(1)
-    c = 0
-    while !ip? or !net? or !dev? or !gw? or  !weight?
-      c++
-      break if c > 5
-      if !ip? and gw?
-        net = guess_net(gw)
-        cidr = dotmask2cidr(net)
-        cnet = gw+"/"+cidr
-        ip = guess_ip_fromnet(cnet)
-      if !weight?        then weight = 1
-      if !ip?  and cnet? then ip     = guess_ip_fromnet($cnet)
-      if !net? and cnet? then net    = cidr2dotmask(cidr = cnet.split('/').pop())
-      if !ip?  and dev?  then ip     = guess_ip_fromdev(dev)
-      if !dev? and ip?   then dev    = guess_dev(ip)
-      if !gw?  and ip?   then gw     = guess_gw(dev,ip,net)
-    if !ip? or !net? or !dev? or !gw? or !weight?
-      console.log "cannot detect network".red, " ip:".white, ip.yellow,
-        " net:".white, net.yellow, " cnet:".white, cnet.yellow, " dev:".white, dev.yellow, " gw:".white, gw.yellow
-      process.exit(1)
-    if ip isnt gw
-      console.log "add".yellow, name.green, " ip:".white, ip.yellow,
-        " net:".white, net.yellow, " cnet:".white, cnet.yellow, " dev:".white, dev.yellow, " gw:".white, gw.yellow
-      @link_add name, dev, ip, net, gw, weight
-
-  @command : (argv) ->
-    while argv.length > 0
-      switch a = argv.shift()
-        when 'help','-h','--help'
-          @help(); process.exit 0
-        when 'install'
-          @install(); process.exit 0
-        when '+link'
-          @link_add_smart(); process.exit 0
-        when '-link'
-          @link_del(argv.shift()); process.exit 0
-        when 'auto'
-          @link_detect(); process.exit 0
-        when 'pak'
-          @pak(); process.exit 0
-        when 'unpak'
-          @unpak(); process.exit 0
-        when 'dist'
-          @dist(); process.exit 0
-        when 'ps'
-          @ps(); process.exit 0
-        when 'getpid'
-          console.log @getpid argv.shift(); process.exit 0
-        when 'linknum'
-          console.log @link_num argv.shift(); process.exit 0
-        when 'rebuild'
-          @rebuild(); process.exit 0
-        when 'get'
-          console.log @argv.shift(); process.exit 0
-        when 'set'
-          @[argv.shift()] =  argv.shift(); process.exit 0
-        when 'quit'
-          @quit(); process.exit 0
-        when 'kill'
-          @kill(); process.exit 0
-        when '-d'
-          @debug = true; break
-        when '-p'
-          @secret = argv.shift(); break
-        when '-P'
-          @ssh_port = argv.shift(); break
-        when '-s'
-          @mode = 'server'; break
-        when '-c'
-          @mode = 'client'; break
-        when '-v'
-          @vpna = argv.shift();
-          @vpnp = argv.shift(); break
-        when '-t'
-          @tuna = @gethostbyname argv.shift()
-          @tunp = argv.shift(); break
-        else
-          if a.match /.*?\..*?/
-            @help(); process.exit 1
-          if argv.length is 1
-            if argv[1] is 'up'
-              @dispatcher_up(a); process.exit 0
-            if argv[1] is 'down'
-              @dispatcher_down(a); process.exit 0
-          if argv.length is 0
-            d = parse_url(a)
-            @tuna = d['host']
-            @tunp = d['port']
-            if d['user']
-              @ssh_user = d['user']; break
-
-Xum.command process.argv
+### echo 'xum deps'; coffee -h || sudo npm install -g coffee-script ###

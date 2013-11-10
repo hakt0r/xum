@@ -27,9 +27,11 @@
 
 */
 
-// FIXME: there must be a better way to get the relevant parts of argv
-process.argv.shift()
-process.argv.shift()
+fs = require('fs')
 
-require('coffee-script')
-require('../src/xum.coffee')
+if(fs.existsSync("../lib/xum.js")){
+  require('../lib/xum.js')
+} else {
+  require('coffee-script')
+  require('../src/xum.coffee')
+}

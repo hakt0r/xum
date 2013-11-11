@@ -104,6 +104,12 @@ log = (key, args...) -> console.log.apply null, ['[',      key,     ']'        ]
 loc = (key, args...) -> console.log.apply null, ['['+'client'.green+'|'+key+']'].concat args
 lor = (key, args...) -> console.log.apply null, ['['+ 'server'.red +'|'+key+']'].concat args
 
+query = (msg, callback) ->
+  socket = net.connect port + 1, (err) -> unless err
+    socket.write JSON.stringify
+    socket.setEncoding 'utf8'
+    socket.on 'data', callback if callback?
+
 hostname = null
 link     = {}
 path     = __filename
@@ -144,20 +150,20 @@ switch cmd
       done : -> log 'ssl'.blue, 'DONE'.green if generate
     ssl.run()
 
+  when 'list' then query list : 'all', (data) -> console.log JSON.parse data
+
   when 'add'
     _rebuild = ->
       # console.log "rebuilding".red
       links =
-        ppp  : dev : 'usb0',  ip : '192.168.42.128', base : '192.168.42.0', gw : '192.168.42.129', weight : 100, num : 1, mask : '24'
+        ppp  : dev : 'usb0',  ip : '192.168.42.248', base : '192.168.42.0', gw : '192.168.42.129', weight : 100, num : 1, mask : '24'
         wifi : dev : 'wlan0', ip : '192.168.43.130', base : '192.168.43.0', gw : '192.168.43.1'  , weight : 100, num : 2, mask : '24'
       s = """
         iptables -F INPUT; iptables -F OUTPUT
         iptables -A INPUT -m state --state ESTABLISHED,RELATED -j CONNMARK --restore-mark
         iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j CONNMARK --restore-mark\n"""
       s += """
-        grep -q "^10#{l.num}" /etc/iproute2/rt_tables ||
-          echo "10#{l.num} T#{l.dev}" >> /etc/iproute2/rt_tables
-        # Routes for #{l.dev}
+        grep -q "^10#{l.num}" /etc/iproute2/rt_tables || echo "10#{l.num} T#{l.dev}" >> /etc/iproute2/rt_tables
         ip route flush table T#{l.dev}
         ip route show table main | grep -Ev '(^default)' | grep #{l.dev} | while read ROUTE ; do
           ip route add table T#{l.dev} $ROUTE; done
@@ -170,7 +176,8 @@ switch cmd
         iptables -A INPUT -i #{l.dev} -m state --state NEW -p tcp --sport 3398#{l.num} -j CONNMARK --set-mark #{l.num}\n
       """ for k,l of links
       s += """iptables -A INPUT -m state --state NEW -m connmark ! --mark 0   -j CONNMARK --save-mark"""
-      console.log s
+      for i in s.split '\n'
+        console.log 'echo '+i+'\n'+i
     _rebuild()
 
   when 'connect'
@@ -221,6 +228,25 @@ switch cmd
             #else if line isnt '' then lor 'debug'.black, line
             null
 
+      ctl : ->
+        server = net.createServer (socket) ->
+          addr = socket.remoteAddress
+          loc 'ctl'.magenta, 'connected'.green, addr
+          socket.setEncoding 'utf8'
+          socket.on 'end',  -> loc 'ctl'.magenta, 'disconnected'.green, addr
+          socket.on 'data', (data) ->
+            data = JSON.parse data
+            for k,v of data
+              switch k
+                when 'add'
+                  links[v.dev] = v
+                  _rebuild()
+                when 'del'
+                  delete links[v] if links[v]?
+                  _rebuild()
+                when 'list' then socket.write JSON.stringify links          
+        server.listen port + 1, '127.0.0.1', => @proceed loc 'ctl'.magenta, 'listening on port', port + 1
+
       tun : ->
         tlsopts = rejectUnauthorized : no, key: pref.ssl.key, cert: pref.ssl.cert
         server = net.createServer (socket) ->
@@ -260,7 +286,7 @@ switch cmd
           @proceed console.log 'tls-server'.magenta, 'listening on port', port-1, err
 
       vpn : -> @proceed scriptline """
-          openvpn --script-security 2 --proto tcp-server --local 127.0.0.1 --port #{port} --dev tun --ifconfig #{localip} #{remoteip}
+        openvpn --script-security 2 --proto tcp-server --local 127.0.0.1 --port #{port} --dev tun --ifconfig #{localip} #{remoteip}
         """,
           error : (s) -> console.log 'vpn'.magenta, s.red   unless s is ''
           line  : (s) -> console.log 'vpn'.magenta, s.black unless s is ''

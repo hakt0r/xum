@@ -144,7 +144,7 @@ switch cmd
           echo "xum check $(md5sum ./xum)"
           coffee ./xum deps || {
             echo "xum deps install"
-            npm install optimist colors portfinder ync 2>&1
+            npm install optimist colors portfinder ync storable xumlib 2>&1
             echo "xum deps installed" ; }
           ls -alh
           test -f config.json || {

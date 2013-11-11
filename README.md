@@ -1,33 +1,26 @@
-## xumlib - shell and network utility library
+## xum - cross uplink multiplexer
 
 ### Installation
-    $ sudo npm xumlib (TODO: publish)
-    $ sudo npm install -g git://github.com/hakt0r/xumlib.git
+    $ sudo npm xum (TODO: publish)
+    $ sudo npm install -g git://github.com/hakt0r/xum.git
 
-### Node.JS Usage:
-    var xl = require('xumlib');
-
-    sh = xl.sh;
-    sh( "sh", [ "-c", "echo hello world" ], function(err,data){
-      console.log(data)
-    })
-
-    script = xl.script;
-    script( "echo hello world", function(err,data){
-      console.log(data)
-    })
+### Usage:
+    $ sudo xum connect user@host:port
+    $ sudo xum add ppp0 --cheap --limit=5k
+    $ sudo xum del ppp0
 
 ### Copyrights
-  * c) 2012-2013 Sebastian Glaser <anx@ulzq.de>
+    * c) 2008-2013 Sebastian Glaser
+    * c) 1999-2005 nd-kt-nr
 
 ### Licensed under GNU GPLv3
 
-xumlib is free software; you can redistribute it and/or modify
+xum is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
 the Free Software Foundation; either version 2, or (at your option)
 any later version.
 
-xumlib is distributed in the hope that it will be useful,
+xum is distributed in the hope that it will be useful,
 but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU General Public License for more details.

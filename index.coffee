@@ -42,68 +42,12 @@ tls = require "tls"
 ync = require 'ync'
 colors = require 'colors'
 optimist = require 'optimist'
-
-class Storable
-  constructor : (@path, opts={}) -> { @defaults, override } = opts; null
-  read : (callback) =>
-    _read = (inp) => try
-      inp = {} unless inp?
-      if @defaults?
-        inp[k] = v for k,v of @defaults when not inp[k]?
-        inp[k] = v for k,v of @defaults when typeof v is 'Number' and typeof inp[k] isnt 'Number'
-      if override?
-        inp[k] = v for k,v of override  when override[k]?
-      @[k] = v for k,v of inp
-      callback inp if callback?
-    fs.readFile @path, (err, data) =>
-      log 'error', err if err
-      try _read JSON.parse data.toString('utf8')
-      catch e
-        log 'error', e; _read {}; @save()
-    null
-  override : (opts={}) =>
-    change = no
-    for k, v of opts
-      change = yes
-      @[k] = v
-    try @save() if change
-    null
-  save : (callback) =>
-    out = {}
-    out[k] = v for k,v of @ when typeof v isnt 'function' and k isnt 'path' and k isnt 'defaults'
-    try fs.writeFile @path, JSON.stringify(out), callback
-    null
-
-script = (cmd, callback) ->
-  c = cp.spawn "sh", ["-c",cmd]
-  c.stdout.setEncoding 'utf8'
-  c.stderr.setEncoding 'utf8'
-  if callback?
-    c.buf = []
-    c.stdout.on 'data', (d) -> c.buf.push(d)
-    c.stderr.on 'data', (d) -> c.buf.push(d)
-    c.on 'close', (e) -> callback(e, c.buf.join().trim())
-  else
-    c.stdout.on 'data', (d) -> console.log d
-    c.stderr.on 'data', (d) -> console.log d
-  return c
-
-scriptline = (cmd, callback) ->
-  c = cp.spawn "sh", [ "-c", cmd ], stdio : 'pipe'
-  c.stdout.setEncoding 'utf8'
-  c.stderr.setEncoding 'utf8'
-  callback.error = console.log unless callback.error
-  callback.line  = console.log unless callback.line
-  callback.end   = (->) unless callback.end
-  c.stderr.on 'data', (data) -> callback.error l.trim() for l in data.split '\n'
-  c.stdout.on 'data', (data) -> callback.line  l.trim() for l in data.split '\n'
-  c.on 'close', callback.end
-  return c
+Storable = require 'storable'
+{ script, scriptline } = require 'xumlib'
 
 log = (key, args...) -> console.log.apply null, ['[',      key,     ']'        ].concat args
 loc = (key, args...) -> console.log.apply null, ['['+'client'.green+'|'+key+']'].concat args
 lor = (key, args...) -> console.log.apply null, ['['+ 'server'.red +'|'+key+']'].concat args
-
 query = (msg, callback) ->
   socket = net.connect port + 1, (err) -> unless err
     socket.write JSON.stringify
@@ -191,24 +135,24 @@ switch cmd
       read : -> pref.read @proceed
 
       ssh : ->
-        return @proceed()
+        #return @proceed()
         ssh = scriptline """ 
-          cat #{path} | ssh -Tp #{sshport} #{user}@#{address} '
-            echo "xum bootstrap $HOME/.xum/xum"
-            mkdir -p $HOME/.xum && cd $HOME/.xum || exit 1 
-            cat - > ./xum
-            echo "xum check $(md5sum ./xum)"
-            coffee ./xum deps || {
-              echo "xum deps install"
-              npm install optimist colors portfinder ync 2>&1
-              echo "xum deps installed" ; }
-            ls -alh
-            test -f config.json || {
-              echo "xum init"
-              coffee ./xum init; }
-            echo "xum start mux"
-            coffee ./xum server 33999 &
-            read; exit 0
+        cat #{path} | ssh -Tp #{sshport} #{user}@#{address} '
+          echo "xum bootstrap $HOME/.xum/xum"
+          mkdir -p $HOME/.xum && cd $HOME/.xum || exit 1 
+          cat - > ./xum
+          echo "xum check $(md5sum ./xum)"
+          coffee ./xum deps || {
+            echo "xum deps install"
+            npm install optimist colors portfinder ync 2>&1
+            echo "xum deps installed" ; }
+          ls -alh
+          test -f config.json || {
+            echo "xum init"
+            coffee ./xum init; }
+          echo "xum start mux"
+          coffee ./xum server 33999 &
+          read; exit 0
         '""",
           error : (line) -> log 'ssh'.red, line.trim() unless line is ''
           line : (line) ->

@@ -2,18 +2,24 @@
   "author": "Sebastian Glaser <anx@ulzq.de> (http://github.com/hakt0r/xum)",
   "name": "xum",
   "description": "cross uplink multiplexer",
-  "version": "0.0.1",
+  "version": "0.0.33",
   "repository": {
     "type": "git",
     "url": "https://github.com/hakt0r/xum.git"
   },
-  "main": "./src/main.js",
+  "main": "./index.js",
   "engines": {
     "node": ">= 0.8.0"
   },
-  "bin": "./bin/xum",
+  "bin": {
+    "xum": "./index.js"
+  },
+  "scripts": {
+    "prepublish": "coffee -bco ./ ./index.coffee"
+  },
   "dependencies": {
     "ync": "~0.0.7",
+    "xumlib": "~0.0.1",
     "colors": "~0.6.0-1",
     "storable": "~0.0.1",
     "optimist": "~0.6.0",

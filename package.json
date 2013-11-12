@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "ync": "~0.0.7",
-    "xumlib": "~0.0.1",
+    "xumlib": "~0.0.2",
     "colors": "~0.6.0-1",
     "storable": "~0.0.1",
     "optimist": "~0.6.0",

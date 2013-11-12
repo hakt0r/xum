@@ -48,28 +48,15 @@ Storable = require 'storable'
 log = (key, args...) -> console.log.apply null, ['[',      key,     ']'        ].concat args
 loc = (key, args...) -> console.log.apply null, ['['+'client'.green+'|'+key+']'].concat args
 lor = (key, args...) -> console.log.apply null, ['['+ 'server'.red +'|'+key+']'].concat args
+
 query = (msg, callback) ->
   socket = net.connect port + 1, (err) -> unless err
     socket.write JSON.stringify
     socket.setEncoding 'utf8'
     socket.on 'data', callback if callback?
 
-hostname = null
-link     = {}
-path     = __filename
-args     = optimist.argv._
-argv     = optimist.argv
-HOME     = argv.config || process.env.HOME + "/.xum"
-port     = argv.port   || 33999
-localip  = argv.local  || '6.66.0.1'
-remoteip = argv.remote || '6.66.0.2'
-pref     = new Storable HOME + '/config.json', defaults : hostname : null, ssl : {}
-cmd      = args.shift()
-
-switch cmd
-  when 'deps' then process.exit 0
-
-  when 'init'
+xum = # don't see a reason for a class here
+  init : ->
     generate = no
     ssl = new ync.Sync
       run : no
@@ -94,37 +81,33 @@ switch cmd
       done : -> log 'ssl'.blue, 'DONE'.green if generate
     ssl.run()
 
-  when 'list' then query list : 'all', (data) -> console.log JSON.parse data
+  rebuild : ->
+    # console.log "rebuilding".red
+    links =
+      ppp  : dev : 'usb0',  ip : '192.168.42.248', base : '192.168.42.0', gw : '192.168.42.129', weight : 100, num : 1, mask : '24'
+      wifi : dev : 'wlan0', ip : '192.168.43.130', base : '192.168.43.0', gw : '192.168.43.1'  , weight : 100, num : 2, mask : '24'
+    s = """
+      iptables -F INPUT; iptables -F OUTPUT
+      iptables -A INPUT -m state --state ESTABLISHED,RELATED -j CONNMARK --restore-mark
+      iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j CONNMARK --restore-mark\n"""
+    s += """
+      grep -q "^10#{l.num}" /etc/iproute2/rt_tables || echo "10#{l.num} T#{l.dev}" >> /etc/iproute2/rt_tables
+      ip route flush table T#{l.dev}
+      ip route show table main | grep -Ev '(^default)' | grep #{l.dev} | while read ROUTE ; do
+        ip route add table T#{l.dev} $ROUTE; done
+      ip route add table T#{l.dev} #{l.gw} dev #{l.dev} src #{l.ip}
+      ip route add table T#{l.dev} default via #{l.gw}
+      ip rule add from #{l.gw} lookup T#{l.dev}
+      ip rule add fwmark #{l.num} lookup T#{l.dev}
+      iptables -A INPUT -i #{l.dev} -m state --state NEW -j CONNMARK --set-mark #{l.num}
+      iptables -A INPUT -m connmark --mark #{l.num} -j MARK --set-mark #{l.num}
+      iptables -A INPUT -i #{l.dev} -m state --state NEW -p tcp --sport 3398#{l.num} -j CONNMARK --set-mark #{l.num}\n
+    """ for k,l of links
+    s += """iptables -A INPUT -m state --state NEW -m connmark ! --mark 0   -j CONNMARK --save-mark"""
+    for i in s.split '\n'
+      console.log 'echo '+i+'\n'+i
 
-  when 'add'
-    _rebuild = ->
-      # console.log "rebuilding".red
-      links =
-        ppp  : dev : 'usb0',  ip : '192.168.42.248', base : '192.168.42.0', gw : '192.168.42.129', weight : 100, num : 1, mask : '24'
-        wifi : dev : 'wlan0', ip : '192.168.43.130', base : '192.168.43.0', gw : '192.168.43.1'  , weight : 100, num : 2, mask : '24'
-      s = """
-        iptables -F INPUT; iptables -F OUTPUT
-        iptables -A INPUT -m state --state ESTABLISHED,RELATED -j CONNMARK --restore-mark
-        iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j CONNMARK --restore-mark\n"""
-      s += """
-        grep -q "^10#{l.num}" /etc/iproute2/rt_tables || echo "10#{l.num} T#{l.dev}" >> /etc/iproute2/rt_tables
-        ip route flush table T#{l.dev}
-        ip route show table main | grep -Ev '(^default)' | grep #{l.dev} | while read ROUTE ; do
-          ip route add table T#{l.dev} $ROUTE; done
-        ip route add table T#{l.dev} #{l.gw} dev #{l.dev} src #{l.ip}
-        ip route add table T#{l.dev} default via #{l.gw}
-        ip rule add from #{l.gw} lookup T#{l.dev}
-        ip rule add fwmark #{l.num} lookup T#{l.dev}
-        iptables -A INPUT -i #{l.dev} -m state --state NEW -j CONNMARK --set-mark #{l.num}
-        iptables -A INPUT -m connmark --mark #{l.num} -j MARK --set-mark #{l.num}
-        iptables -A INPUT -i #{l.dev} -m state --state NEW -p tcp --sport 3398#{l.num} -j CONNMARK --set-mark #{l.num}\n
-      """ for k,l of links
-      s += """iptables -A INPUT -m state --state NEW -m connmark ! --mark 0   -j CONNMARK --save-mark"""
-      for i in s.split '\n'
-        console.log 'echo '+i+'\n'+i
-    _rebuild()
-
-  when 'connect'
+  connect : ->
     address = args.shift(); ssh = vpn = null
     [ user, address ] = address.split(/@/) if address.match /@/
     [ address, sshport ] = address.split(/:/) if address.match /:/
@@ -135,7 +118,6 @@ switch cmd
       read : -> pref.read @proceed
 
       ssh : ->
-        #return @proceed()
         ssh = scriptline """ 
         cat #{path} | ssh -Tp #{sshport} #{user}@#{address} '
           echo "xum bootstrap $HOME/.xum/xum"
@@ -209,7 +191,7 @@ switch cmd
           error : (line) -> loc 'vpn'.red, line.trim() unless line is ''
           line : (line) -> loc 'vpn'.blue, line.trim() unless line is ''
 
-  when 'server'
+  server : ->
     [ localip, remoteip ] = [ remoteip, localip ]
     start = new ync.Sync
       read : -> pref.read @proceed
@@ -240,6 +222,26 @@ switch cmd
         console.log 'xum port', port-1, port
         console.log 'xum ready'
 
-  else console.log 'error'.red, 'Command', cmd.red, 'not found.'
+  cli : (cmd) -> switch cmd
+    when 'deps' then process.exit 0
+    when 'init' then xum.init()
+    when 'list' then query list : yes, (data) -> console.log JSON.parse data
+    when 'add'  then query add : argv, (data) -> console.log JSON.parse data
+    when 'connect' then xum.connect()
+    when 'server'  then xum.server()
+    else console.log 'error'.red, 'Command', cmd.red, 'not found.'
 
-### echo 'xum deps'; coffee -h || sudo npm install -g coffee-script ###
+hostname = null
+link     = {}
+path     = __filename
+args     = optimist.argv._
+argv     = optimist.argv
+HOME     = argv.config || process.env.HOME + "/.xum"
+port     = argv.port   || 33999
+localip  = argv.local  || '6.66.0.1'
+remoteip = argv.remote || '6.66.0.2'
+pref     = new Storable HOME + '/config.json', defaults : hostname : null, ssl : {}
+
+module.exports = xum
+
+xum.cli args.shift()

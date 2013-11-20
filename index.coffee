@@ -43,15 +43,26 @@ dgram = require 'dgram'
 colors = require 'colors'
 optimist = require 'optimist'
 Storable = require 'storable'
-{ script, scriptline } = require 'xumlib'
+{ script, scriptline } = xl = require 'xumlib'
 
-log = (key, args...) -> console.log.apply null, ['[',      key,     ']'        ].concat args
+hostname = null
+path     = __filename
+args     = optimist.argv._
+argv     = optimist.argv
+HOME     = argv.config || process.env.HOME + "/.xum"
+port     = argv.port   || 33999
+localip  = argv.local  || '6.66.0.1'
+remoteip = argv.remote || '6.66.0.2'
+pref     = new Storable HOME + '/config.json', defaults : hostname : null, ssl : {}
+links = {}; dist = []; last = 0
+
+log = (key, args...) -> console.log.apply null, ['[',key,']'].concat args
 loc = (key, args...) -> console.log.apply null, ['['+'client'.green+'|'+key+']'].concat args
-lor = (key, args...) -> console.log.apply null, ['['+ 'server'.red +'|'+key+']'].concat args
+lor = (key, args...) -> console.log.apply null, ['['+'server'.red+  '|'+key+']'].concat args
 
 query = (msg, callback) ->
   socket = net.connect port + 1, (err) -> unless err
-    socket.write JSON.stringify
+    socket.write JSON.stringify msg
     socket.setEncoding 'utf8'
     socket.on 'data', callback if callback?
 
@@ -66,7 +77,7 @@ xum = # don't see a reason for a class here
         log 'ssl'.blue, 'Generating ssl key:'.red, HOME.yellow
         generate = yes
         script """
-          mkdir -p $HOME/.xum && cd $HOME/.xum || exit 1 
+          mkdir -p $HOME/.xum && cd $HOME/.xum  || exit 1 
           openssl genrsa -out #{HOME}/server-key.pem 4096
           openssl req -new -x509 -subj "/C=XX/ST=xum/L=api/O=IT/CN=#{hostname}" -key #{HOME}/server-key.pem -out #{HOME}/server-cert.pem
         """, (status,err) ->
@@ -81,10 +92,40 @@ xum = # don't see a reason for a class here
       done : -> log 'ssl'.blue, 'DONE'.green if generate
     ssl.run()
 
+  smartadd : (dev,gw,callback) ->
+    n = {}
+    n.dev = dev
+    n.gw  = gw
+    s = new ync.Sync
+      getip : -> xl.devip dev, @proceed
+      setip : (ip) -> @proceed n.ip = ip
+      getmask : -> xl.devmask dev, @proceed
+      setmask : (mask) -> @proceed n.mask = mask
+      findgw : ->
+        if n.gw? and n.gw isnt '' then @proceed()
+        else xl.devgw n.dev, @proceed
+      foundgw : (gw) ->
+        n.gw = gw
+        n.gw = xl.netfirst n.ip unless n.gw?
+        query add : n, (result) -> callback() if callback?
+
+  add : (net) ->
+    net.num = (Object.keys links).length + 1
+    loc 'ctl'.magenta, "Adding link #{net.num} #{net.dev} via #{net.gw}"
+    net.udp = udp = dgram.createSocket 'udp4'
+    udp.on "error", (err) ->
+      loc "mux".magenta, "prx error:\n" + err.stack
+      udp.close()
+    udp.on "listening",=>
+      loc "mux".magenta, "prx[#{net.num}] bound " + (33890 + net.num).toString().blue
+      links[net.dev] = net
+      dist.push net
+      xum.rebuild()
+      loc 'ctl'.magenta, "Added link #{net.num} #{net.dev} via #{net.gw}"
+    udp.bind port
+
+
   rebuild : -> # console.log "rebuilding".red
-    links =
-      ppp  : dev : 'usb0',  ip : '192.168.42.248', base : '192.168.42.0', gw : '192.168.42.129', weight : 100, num : 1, mask : '24'
-      wifi : dev : 'wlan0', ip : '192.168.43.130', base : '192.168.43.0', gw : '192.168.43.1'  , weight : 100, num : 2, mask : '24'
     s = """
       iptables -F INPUT; iptables -F OUTPUT
       iptables -A INPUT -m state --state ESTABLISHED,RELATED -j CONNMARK --restore-mark
@@ -100,11 +141,11 @@ xum = # don't see a reason for a class here
       ip rule add fwmark #{l.num} lookup T#{l.dev}
       iptables -A INPUT -i #{l.dev} -m state --state NEW -j CONNMARK --set-mark #{l.num}
       iptables -A INPUT -m connmark --mark #{l.num} -j MARK --set-mark #{l.num}
-        iptables -A INPUT -i #{l.dev} -m state --state NEW -p tcp --sport 3398#{l.num} -j CONNMARK --set-mark #{l.num}\n
+      iptables -A INPUT -p udp --sport #{33980 + l.num} -j CONNMARK --set-mark #{l.num}\n
     """ for k,l of links
-    s += """iptables -A INPUT -m state --state NEW -m connmark ! --mark 0   -j CONNMARK --save-mark"""
-    for i in s.split '\n'
-      console.log 'echo '+i+'\n'+i
+    s += """iptables -A INPUT -m state --state NEW -m connmark ! --mark 0 -j CONNMARK --save-mark"""
+    # console.log 'echo '+i+'\n'+i for i in s.split '\n'
+    script s
 
   connect : ->
     address = args.shift(); ssh = vpn = null
@@ -146,7 +187,7 @@ xum = # don't see a reason for a class here
                   loc 'server'.blue, 'ready'.green
                   connect.proceed()
                 else loc 'ssh'.blue, status.red, line
-            #else if line isnt '' then lor 'debug'.black, line
+            else if line isnt '' then lor 'debug'.black, line
             null
       ctl : ->
         server = net.createServer (socket) ->
@@ -154,46 +195,42 @@ xum = # don't see a reason for a class here
           loc 'ctl'.magenta, 'connected'.green, addr
           socket.setEncoding 'utf8'
           socket.on 'end',  -> loc 'ctl'.magenta, 'disconnected'.green, addr
-          socket.on 'data', (data) ->
-            data = JSON.parse data
-            for k,v of data
-              switch k
-                when 'add'
-                  return
-                  links[v.dev] = v
-                  dist.push v                  
-                  xum.rebuild()
-                when 'del'
-                  delete dist[l] for l,w in dist when w.dev is v.dev 
-                  delete links[v] if links[v]?
-                  xum.rebuild()
-                when 'list' then socket.write JSON.stringify links          
+          socket.on 'data', (data) -> for k,v of data = JSON.parse data
+            switch k
+              when 'add' then xum.add v
+              when 'del'
+                delete dist[l] for l,w in dist when w.dev is v.dev 
+                delete links[v] if links[v]?
+                xum.rebuild()
+              when 'list' then socket.write JSON.stringify links          
         server.listen port + 1, '127.0.0.1', => @proceed loc 'ctl'.magenta, 'listening on port', port + 1
+      get_default_gw : -> xl.gwdev @proceed
+      add_default_gw : (gw, dev) -> @proceed xum.smartadd(dev, gw)
       mux : ->
         udp = dgram.createSocket 'udp4'
         udp.on "error", (err) ->
-          loc "mux".magenta "prx error:\n" + err.stack
+          loc "mux".magenta, "prx error:\n" + err.stack
           udp.close()
-        udp.on "message", xum.dist port - 1
-        udp.on "listening", ->
+        udp.on "message", xum.dist udp, port - 1
+        udp.on "listening",=>
           address = udp.address()
-          loc "mux".magenta "prx listening " + address.address + ":" + address.port
-          @proceed console.log 'mux'.magenta, 'listening on port', port, err
+          loc "mux".magenta, "prx listening " + address.address + ":" + address.port
+          connect.proceed console.log 'mux'.magenta, 'listening on port', port
         udp.bind port
       vpn : -> scriptline "openvpn --local 127.0.0.1 #{port - 1} --remote 127.0.0.1 #{port} --dev tun --ifconfig #{localip} #{remoteip}",
         error : (line) -> loc 'vpn'.red, line.trim() unless line is ''
         line : (line) -> loc 'vpn'.blue, line.trim() unless line is ''
 
-  dist : (port) -> (msg, rinfo) ->
-    # console.log "mux prx got: " + msg + " from " + rinfo.address + ":" + rinfo.port
+  dist : (udp,port) -> (msg, rinfo) ->
     if rinfo.address is "127.0.0.1"
       last = last + 1 % dist.length
       link = dist[last]
+      console.log "mux prx got: " + msg + " from " + rinfo.address + ":" + rinfo.port + ' using link ' + last
       udp.send msg, 0, msg.length, link.port, link.address
     else udp.send msg, 0, msg.length, port, "127.0.0.1"
 
   server : ->
-    [ localip, remoteip ] = [ remoteip, localip ]
+    t = localip; localip =  remoteip; remoteip = t
     start = new ync.Sync
       read : -> pref.read @proceed
       kill : -> if pref.pid then script "kill -9 #{pref.pid}", @proceed else @proceed()
@@ -201,7 +238,6 @@ xum = # don't see a reason for a class here
         pref.pid  = process.pid
         pref.save @proceed
       mux : ->
-        last = null; dist = []
         new_link = (rinfo) ->
           port = rinfo.port
           last = port
@@ -216,11 +252,10 @@ xum = # don't see a reason for a class here
           console.log 'initial packet from', rinfo.address, rinfo.port
           new_link rinfo
           last = 0
-          udp.on "message", xum.dist port
+          udp.on "message", xum.dist udp, port
         udp.on "listening", ->
           address = udp.address()
-          console.log "mux prx listening " + address.address + ":" + address.port
-          @proceed console.log 'mux'.magenta, 'listening on port', port - 1, err
+          start.proceed console.log "mux prx listening " + address.address + ":" + address.port
         udp.bind port - 1
       vpn : -> @proceed scriptline """openvpn --local 127.0.0.1 --port #{port} --dev tun --ifconfig #{localip} #{remoteip}""",
         error : (s) -> console.log 'vpn'.magenta, s.red   unless s is ''
@@ -234,26 +269,10 @@ xum = # don't see a reason for a class here
     when 'deps' then process.exit 0
     when 'init' then xum.init()
     when 'list' then query list : yes, (data) -> console.log JSON.parse data
-    when 'add' # then query add : argv, (data) -> console.log JSON.parse data
-      net = {}
-      net.gw = args.shift()
-
-      log net
+    when 'add' then xum.smartadd args.shift(),args.shift()
     when 'connect' then xum.connect()
     when 'server'  then xum.server()
     else console.log 'error'.red, 'Command', cmd.red, 'not found.'
 
-hostname = null
-path     = __filename
-args     = optimist.argv._
-argv     = optimist.argv
-HOME     = argv.config || process.env.HOME + "/.xum"
-port     = argv.port   || 33999
-localip  = argv.local  || '6.66.0.1'
-remoteip = argv.remote || '6.66.0.2'
-pref     = new Storable HOME + '/config.json', defaults : hostname : null, ssl : {}
-links = {}; dist = []
-
 module.exports = xum
-
 xum.cli args.shift()
